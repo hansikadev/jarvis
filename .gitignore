@@ -1,1 +1,4 @@
 .env
+credentials.json
+backend/token.json
+token.json

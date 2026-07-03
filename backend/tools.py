@@ -2,7 +2,7 @@ from googleapiclient.discovery import build
 from datetime import datetime
 import pandas as pd
 
-EXCEL_FILE = "your_data.xlsx"  # change to your actual excel filename
+EXCEL_FILE = "pod4jsr.xlsx"  # change to your actual excel filename
 
 def search_gmail(creds, query: str, max_results: int = 10):
     service = build("gmail", "v1", credentials=creds)
