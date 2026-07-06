@@ -6,6 +6,7 @@ import os
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
 ]
 
 CREDENTIALS_FILE = "credentials.json"

@@ -25,7 +25,10 @@ if user_input:
     # Get agent response
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            response = ask_agent(user_input)
+            try:
+                response = ask_agent(user_input)
+            except Exception as e:
+                response = f"Error: {e}"
             st.markdown(response)
 
     st.session_state.messages.append({"role": "assistant", "content": response})
