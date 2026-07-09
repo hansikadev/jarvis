@@ -23,6 +23,7 @@ Workbook structure (confirmed from real file):
 from googleapiclient.discovery import build
 from datetime import datetime
 import pandas as pd
+from pathlib import Path
 
 # ---------------------------------------------------------------------
 # Config: tabs to exclude from the unified job dataframe
@@ -106,98 +107,106 @@ def _find_header_row(raw_df: pd.DataFrame):
     return None
 
 
-def load_master_job_df(excel_path: str) -> pd.DataFrame:
+def load_master_job_df(excel_paths: list) -> pd.DataFrame:
     """
-    Load every brand tab, auto-detect the real header row per tab,
-    tag each row with its Brand Name (the tab name), and concat into
-    one unified dataframe covering the whole workbook.
-
-    Sheets that are empty, too small to have a real header, or that
-    raise any read error (e.g. malformed pivot-table tabs) are skipped
-    rather than crashing the whole load.
+    Load every brand tab from all excel paths, auto-detect the real header row per tab,
+    tag each row with its Brand Name (the tab name) and Source File, and concat into
+    one unified dataframe.
     """
-    xls = pd.ExcelFile(excel_path)
     all_dfs = []
 
-    for sheet_name in xls.sheet_names:
-        if sheet_name.strip() in NON_JOB_SHEETS:
-            continue
-
+    for path in excel_paths:
+        file_name = Path(path).name
         try:
-            # Read raw first to find where the real header row is
-            raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+            xls = pd.ExcelFile(path)
+            for sheet_name in xls.sheet_names:
+                if sheet_name.strip() in NON_JOB_SHEETS:
+                    continue
 
-            header_row = _find_header_row(raw)
-            if header_row is None:
-                # Nothing usable in this sheet (empty / near-empty /
-                # pivot-table artifact) — skip it silently.
-                continue
+                try:
+                    # Read raw first to find where the real header row is
+                    raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
 
-            df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
+                    header_row = _find_header_row(raw)
+                    if header_row is None:
+                        continue
 
-            # Skip tabs that don't actually have a JOB ID column
-            # (guards against unexpected/non-job tabs slipping through)
-            cols_upper = [str(c).strip().upper() for c in df.columns]
-            if JOB_ID_MARKER not in cols_upper:
-                continue
+                    df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
 
-            # Drop fully-empty rows (common in these sheets — blank template rows)
-            df = df.dropna(how="all")
+                    # Skip tabs that don't actually have a JOB ID column
+                    cols_upper = [str(c).strip().upper() for c in df.columns]
+                    if JOB_ID_MARKER not in cols_upper:
+                        continue
 
-            # Clean column names: strip whitespace/newlines
-            df.columns = [str(c).strip().replace("\n", " ") for c in df.columns]
+                    # Drop fully-empty rows
+                    df = df.dropna(how="all")
 
-            df["Brand Name"] = sheet_name.strip()
-            all_dfs.append(df)
+                    # Clean column names: strip whitespace/newlines
+                    df.columns = [str(c).strip().replace("\n", " ") for c in df.columns]
 
+                    df["Brand Name"] = sheet_name.strip()
+                    df["Source File"] = file_name
+                    all_dfs.append(df)
+
+                except Exception as e:
+                    print(f"[load_master_job_df] Skipping sheet '{sheet_name}' in '{file_name}': {e}")
+                    continue
         except Exception as e:
-            # Don't let one malformed/unusual tab (e.g. a pivot table
-            # with an unexpected layout) take down the whole load.
-            print(f"[load_master_job_df] Skipping sheet '{sheet_name}': {e}")
+            print(f"[load_master_job_df] Skipping file '{file_name}': {e}")
             continue
 
     if not all_dfs:
-        raise ValueError("No job tabs found — check NON_JOB_SHEETS config or header detection.")
+        return pd.DataFrame()
 
     master_df = pd.concat(all_dfs, ignore_index=True, sort=False)
     return master_df
 
 
-def load_meeting_schedule(excel_path: str) -> pd.DataFrame:
+def load_meeting_schedule(excel_paths: list) -> pd.DataFrame:
     """
-    Load the 'Clients Meeting Schedule' tab separately — this is a
-    calendar/attendance tracker, not job data, so it gets its own loader
-    and its own tool for the agent to call.
+    Load the 'Clients Meeting Schedule' tab separately from all excel paths,
+    tagging each row with its Source File, and concat into one unified dataframe.
     """
-    xls = pd.ExcelFile(excel_path)
-    sheet_name = next(
-        (s for s in xls.sheet_names if "meeting" in s.lower()), None
-    )
-    if sheet_name is None:
-        raise ValueError("Could not find a 'Clients Meeting Schedule' tab.")
+    all_dfs = []
 
-    # Real headers here start a few rows down too (row with "Month" etc.)
-    raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-    header_row = None
-    for i in range(min(10, len(raw))):
-        row_values = raw.iloc[i].astype(str).str.strip().str.upper()
-        if (row_values == "MONTH").any():
-            header_row = i
-            break
-    if header_row is None:
-        header_row = 3  # fallback based on observed layout
+    for path in excel_paths:
+        file_name = Path(path).name
+        try:
+            xls = pd.ExcelFile(path)
+            sheet_name = next(
+                (s for s in xls.sheet_names if "meeting" in s.lower()), None
+            )
+            if sheet_name is None:
+                continue
 
-    # Guard against a fallback header row that exceeds the sheet's
-    # actual row count (would otherwise raise a pandas ValueError).
-    if header_row >= len(raw):
-        raise ValueError(
-            f"Sheet '{sheet_name}' has only {len(raw)} rows — "
-            "too few to contain a real meeting-schedule header."
-        )
+            # Real headers here start a few rows down too (row with "Month" etc.)
+            raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+            header_row = None
+            for i in range(min(10, len(raw))):
+                row_values = raw.iloc[i].astype(str).str.strip().str.upper()
+                if (row_values == "MONTH").any():
+                    header_row = i
+                    break
+            if header_row is None:
+                header_row = 3  # fallback based on observed layout
 
-    df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
-    df.columns = [str(c).strip().replace("\n", " ") for c in df.columns]
-    df = df.dropna(how="all")
+            # Guard against a fallback header row that exceeds the sheet's actual row count
+            if header_row >= len(raw):
+                continue
+
+            df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
+            df.columns = [str(c).strip().replace("\n", " ") for c in df.columns]
+            df = df.dropna(how="all")
+            df["Source File"] = file_name
+            all_dfs.append(df)
+        except Exception as e:
+            print(f"[load_meeting_schedule] Skipping file '{file_name}': {e}")
+            continue
+
+    if not all_dfs:
+        return pd.DataFrame()
+
+    df = pd.concat(all_dfs, ignore_index=True, sort=False)
     return df
 
 

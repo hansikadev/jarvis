@@ -22,6 +22,7 @@ dataframe, and only the computed RESULT goes back to Mistral to explain.
 
 import json
 import os
+from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 from mistralai.client import Mistral
@@ -40,11 +41,25 @@ load_dotenv()
 client = Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
 creds = get_credentials()
 
-EXCEL_PATH = "pod4jsr.xlsx"  # matches the real file in backend/
+def get_excel_paths() -> list:
+    backend_dir = Path(__file__).parent
+    downloads_dir = backend_dir / "jsr_downloads"
+    
+    paths = []
+    # Scan backend_dir
+    for p in backend_dir.glob("*.xls*"):
+        if not p.name.startswith("~$") and p.is_file():
+            paths.append(str(p))
+    # Scan downloads_dir if it exists
+    if downloads_dir.exists():
+        for p in downloads_dir.glob("*.xls*"):
+            if not p.name.startswith("~$") and p.is_file():
+                paths.append(str(p))
+    return paths
 
 # Load once at startup; refresh via reload_data() if the file changes
-master_job_df = load_master_job_df(EXCEL_PATH)
-meeting_df = load_meeting_schedule(EXCEL_PATH)
+master_job_df = load_master_job_df(get_excel_paths())
+meeting_df = load_meeting_schedule(get_excel_paths())
 
 
 def _schema_summary(df: pd.DataFrame, n_samples: int = 3) -> str:
@@ -150,11 +165,22 @@ def run_tool(name, tool_input):
 
 
 def build_system_prompt() -> str:
+    excel_files = [Path(p).name for p in get_excel_paths()]
+    files_str = "\n".join([f"- {f}" for f in excel_files])
+    
     return f"""You are Jarvis, a personal assistant agent with access to Gmail,
-Google Calendar, and a JSR job tracker Excel workbook.
+Google Calendar, and a collection of JSR job tracker Excel workbooks.
 
-For any Excel/job-tracker question, write pandas code against the schema
-below rather than guessing. Always assign your final answer to `result`.
+We have loaded data from the following JSR Excel files:
+{files_str}
+
+Each row in the database has a 'Source File' column indicating which file it came from.
+- If the user query implies a specific file (e.g. 'Pod 1 JSR' or 'Canva'), you MUST filter by the 'Source File' column using a substring check, like:
+  df[df['Source File'].str.contains('Pod 1', case=False, na=False)]
+- If the user query is general or spans across all files (e.g. 'How many total projects are in progress?'), you MUST query across all files and NOT filter by 'Source File'.
+- Always analyze the user's query and decide whether to refer to a single sheet/file or aggregate across all files.
+
+For any Excel/job-tracker question, write pandas code against the schema below rather than guessing. Always assign your final answer to `result`.
 
 JOB TRACKER SCHEMA (query_job_tracker -> df):
 {_schema_summary(master_job_df)}
@@ -207,8 +233,9 @@ def ask_agent(user_message: str, history: list = None) -> str:
 def reload_data():
     """Call this if the Excel file changes and you want fresh data without restarting."""
     global master_job_df, meeting_df
-    master_job_df = load_master_job_df(EXCEL_PATH)
-    meeting_df = load_meeting_schedule(EXCEL_PATH)
+    excel_paths = get_excel_paths()
+    master_job_df = load_master_job_df(excel_paths)
+    meeting_df = load_meeting_schedule(excel_paths)
 
 
 if __name__ == "__main__":
